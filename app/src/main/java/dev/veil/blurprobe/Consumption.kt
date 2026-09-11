@@ -43,7 +43,7 @@ object Curve {
     var g = 180.0
 
     /** 上限に到達する消費量 */
-    var t = 600.0
+    var t = 1200.0
 
     /** 曲線の指数 */
     var k = 2.0
@@ -76,6 +76,7 @@ class ConsumptionStore(context: Context) {
         private const val KEY_C = "c"
         private const val KEY_AT = "at"
         private const val KEY_DAY = "day"
+        private const val KEY_RESET_DAY = "resetDay"
 
         /** 減衰の半減期（秒）。対象アプリから離れている間に効く */
         const val HALF_LIFE_SEC = 5400.0
@@ -98,6 +99,15 @@ class ConsumptionStore(context: Context) {
     private var c: Double = prefs.getFloat(KEY_C, 0f).toDouble()
     private var at: Long = prefs.getLong(KEY_AT, System.currentTimeMillis())
     private var day: Long = prefs.getLong(KEY_DAY, veilDay(System.currentTimeMillis()))
+
+    /**
+     * 手動リセットを使った日。1 日 1 回までという制限の記録。
+     *
+     * C を 0 に戻すのは強い救済なので回数を絞る。使ったこと自体が残るので、
+     * 毎日使っているなら「カーブが厳しすぎる」という判断材料になる（R-02 の観測）。
+     */
+    private var resetDay: Long = prefs.getLong(KEY_RESET_DAY, -1L)
+
     private var lastFlush = 0L
 
     /** 対象アプリを見ている間は true。この間は減衰させない */
@@ -156,6 +166,39 @@ class ConsumptionStore(context: Context) {
         flush()
     }
 
+    // ------------------------------------------------------------- 手動リセット
+
+    /** 今日まだ使っていなければ true */
+    fun canReset(now: Long = System.currentTimeMillis()): Boolean {
+        rolloverIfNeeded(now)
+        return resetDay != veilDay(now)
+    }
+
+    /** 消費量を 0 に戻す。使えたら true、今日すでに使っていたら false */
+    fun useReset(now: Long = System.currentTimeMillis()): Boolean {
+        if (!canReset(now)) return false
+        c = 0.0
+        at = now
+        resetDay = veilDay(now)
+        flush(force = true)
+        return true
+    }
+
+    /** 検証用。今日の使用済みフラグを消す */
+    fun unlockReset() {
+        resetDay = -1L
+        flush(force = true)
+    }
+
+    /** 次にリセットが使えるようになるまでの時間（分）。使えるなら 0 */
+    fun minutesUntilResetAvailable(now: Long = System.currentTimeMillis()): Int {
+        if (canReset(now)) return 0
+        val offset = java.util.TimeZone.getDefault().getOffset(now)
+        val shifted = now + offset - DAY_START_HOUR * 3_600_000L
+        val nextDayStart = ((shifted / 86_400_000L) + 1) * 86_400_000L
+        return max(0L, (nextDayStart - shifted) / 60_000L).toInt()
+    }
+
     /** 検証用。待たずに任意の消費量へ飛ばす */
     fun override(newValue: Double, now: Long = System.currentTimeMillis()) {
         c = max(0.0, newValue)
@@ -176,6 +219,9 @@ class ConsumptionStore(context: Context) {
     }
 
     fun persistNow() = flush(force = true)
+
+    /** 表示用。今日リセットを使ったかどうか */
+    fun resetUsedToday(now: Long = System.currentTimeMillis()): Boolean = !canReset(now)
 
     /** 表示用。消費量を「何分ぶん」として読めるようにする */
     fun minutes(now: Long = System.currentTimeMillis()): Double = value(now) / 60.0

@@ -20,6 +20,7 @@ import android.util.Log
 import android.view.WindowManager
 import android.view.accessibility.AccessibilityEvent
 import android.widget.FrameLayout
+import android.widget.Toast
 import java.util.function.Consumer
 import kotlin.math.abs
 import kotlin.math.max
@@ -268,8 +269,14 @@ class ProbeService : AccessibilityService() {
 
     fun handleCommand(i: Intent) = ui.post {
         when (i.getStringExtra("cmd")) {
-            "toggle" -> { toggleInternal(); return@post }
+            "reset", "toggle" -> { requestReset(); return@post }
             "stop" -> { disableSelf(); return@post }
+        }
+        // 検証用。1 日待たずに解除の権利を戻す
+        if (i.getBooleanExtra("unlock", false)) {
+            store.unlockReset()
+            Log.i(TAG, "手動リセットの権利を戻した（検証用）")
+            toast("解除の権利を戻しました")
         }
         i.getStringExtra("mode")?.let { auto = it != "manual" }
         if (i.hasExtra("ramp")) rampMs = max(0, i.getIntExtra("ramp", DEFAULT_RAMP_MS))
@@ -294,17 +301,35 @@ class ProbeService : AccessibilityService() {
         Log.i(TAG, status())
     }
 
-    /** タイルと通知の「解除 / 復帰」 */
-    fun toggleVeil() = ui.post { toggleInternal() }
-
-    private fun toggleInternal() {
-        if (targetRadius() > 0) {
-            auto = false
-            manualRadius = 0
-        } else {
+    /**
+     * タイルと通知の「ぼかしを解除」。消費量を 0 に戻す。
+     *
+     * **1 日 1 回まで。** C のリセットは強い救済なので回数を絞っている。
+     * 使ったこと自体が記録に残り、毎日使うようならカーブが厳しすぎるという
+     * 判断材料になる（R-02 の観測）。
+     */
+    fun requestReset() = ui.post {
+        if (store.useReset()) {
             auto = true
+            manualRadius = 0
+            apply()
+            val msg = "ぼかしをリセットしました。解除は1日1回のみです"
+            Log.i(TAG, "手動リセット実行: $msg")
+            toast(msg)
+        } else {
+            val mins = store.minutesUntilResetAvailable()
+            val msg = "本日の解除は使用済みです。あと${mins / 60}時間${mins % 60}分で回復します"
+            Log.i(TAG, "手動リセット拒否: $msg")
+            toast(msg)
+            render()
         }
-        apply()
+    }
+
+    /** 今日まだ解除を使っていないか。タイルと通知の表示に使う */
+    fun resetAvailable(): Boolean = store.canReset()
+
+    private fun toast(msg: String) {
+        Toast.makeText(this, msg, Toast.LENGTH_LONG).show()
     }
 
     // ---------------------------------------------------------------- 表示
@@ -335,18 +360,19 @@ class ProbeService : AccessibilityService() {
             store.accumulating -> "計測中  ${"%.1f".format(mins)}分"
             else -> "待機中  ${"%.1f".format(mins)}分"
         }
+        val canReset = store.canReset()
         val n = Notification.Builder(this, CHANNEL_ID)
             .setSmallIcon(android.R.drawable.ic_menu_view)
             .setContentTitle(title)
             .setContentText(
-                "${Targets.labelOf(frontPkg)} ・ C ${store.value().roundToInt()}" +
-                    " ・ 強度 ${(Curve.p(store.value()) * 100).roundToInt()}%"
+                "${Targets.labelOf(frontPkg)} ・ 強度 ${(Curve.p(store.value()) * 100).roundToInt()}%" +
+                    " ・ 解除 ${if (canReset) "残り1回" else "本日使用済"}"
             )
             .setOngoing(true)
             .setOnlyAlertOnce(true)
             .setShowWhen(false)
             .setContentIntent(open)
-            .addAction(cmdAction(if (r > 0) "解除" else "復帰", "toggle"))
+            .addAction(cmdAction(if (canReset) "ぼかしを解除" else "解除は明日まで待つ", "reset"))
             .build()
         runCatching { nm.notify(NOTIF_ID, n) }
             .onFailure { e -> Log.w(TAG, "通知を出せません（権限未許可?）: $e") }
@@ -366,7 +392,7 @@ class ProbeService : AccessibilityService() {
         return "pkg=%s C=%.0f (%.1f分) p=%.2f r=%d auto=%s acc=%s shade=%s screen=%s blur=%s".format(
             frontPkg ?: "-", c, c / 60.0, Curve.p(c), targetRadius(),
             auto, store.accumulating, shadeFront, screenOn, wm.isCrossWindowBlurEnabled
-        )
+        ) + " reset=" + (if (store.canReset()) "可" else "本日使用済")
     }
 
     private fun logEnvironment() {
