@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    画面内容は一切読まない（canRetrieveWindowContent=false）。
+    受け取るのは「どのアプリが前面に来たか」だけで、通知シェードの開閉検出に使う。
+-->
+<accessibility-service xmlns:android="http://schemas.android.com/apk/res/android"
+    android:accessibilityEventTypes="typeWindowStateChanged|typeWindowsChanged"
+    android:accessibilityFeedbackType="feedbackGeneric"
+    android:accessibilityFlags="flagDefault|flagIncludeNotImportantViews"
+    android:canRetrieveWindowContent="false"
+    android:notificationTimeout="0" />

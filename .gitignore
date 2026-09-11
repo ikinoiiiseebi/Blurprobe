@@ -1,0 +1,28 @@
+# Android / Gradle
+*.iml
+.gradle/
+.kotlin/
+build/
+captures/
+.externalNativeBuild/
+.cxx/
+
+# ローカル環境依存。SDK のパスが入るので絶対にコミットしない
+local.properties
+
+# IDE
+.idea/
+*.hprof
+
+# 署名鍵
+*.jks
+*.keystore
+keystore.properties
+
+# OS
+.DS_Store
+Thumbs.db
+
+# 検証中の生成物
+*.apk
+*.aab
