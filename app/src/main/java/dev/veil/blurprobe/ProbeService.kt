@@ -497,7 +497,8 @@ class ProbeService : AccessibilityService() {
     fun status(): String {
         val c = store.value()
         return "pkg=%s C=%.0f (%.1f分) p=%.2f r=%d auto=%s acc=%s shade=%s screen=%s blur=%s".format(
-            frontPkg ?: "-", c, c / 60.0, Curve.p(c), targetRadius(),
+            activeTarget() ?: frontPkg ?: "-", c, c / 60.0,
+            settings.strengthFor(activeTarget(), c), targetRadius(),
             auto, store.accumulating, shadeFront, screenOn, wm.isCrossWindowBlurEnabled
         ) + " reset=" + (if (store.canReset()) "可" else "本日使用済") +
             " enabled=" + settings.enabled +
