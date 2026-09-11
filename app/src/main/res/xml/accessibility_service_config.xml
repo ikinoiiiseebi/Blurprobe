@@ -1,11 +1,16 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!--
-    画面内容は一切読まない（canRetrieveWindowContent=false）。
-    受け取るのは「どのアプリが前面に来たか」だけで、通知シェードの開閉検出に使う。
+    受け取るイベント:
+      typeWindowStateChanged … 前面アプリの追跡、通知シェードの開閉検出
+      typeViewScrolled       … 1 枚送りのスクロール（Shorts の一次判定とスワイプ計数）
+
+    canRetrieveWindowContent と flagReportViewIds は、Shorts 画面にしか無い
+    ビュー ID を探すために必要。**探すのは ID の有無だけで、テキストは読まないし保存もしない**
+    （NFR-01）。ID 判定が壊れても一次判定だけで動くようにしてある。
 -->
 <accessibility-service xmlns:android="http://schemas.android.com/apk/res/android"
-    android:accessibilityEventTypes="typeWindowStateChanged|typeWindowsChanged"
+    android:accessibilityEventTypes="typeWindowStateChanged|typeWindowsChanged|typeViewScrolled"
     android:accessibilityFeedbackType="feedbackGeneric"
-    android:accessibilityFlags="flagDefault|flagIncludeNotImportantViews"
-    android:canRetrieveWindowContent="false"
+    android:accessibilityFlags="flagDefault|flagIncludeNotImportantViews|flagReportViewIds|flagRetrieveInteractiveWindows"
+    android:canRetrieveWindowContent="true"
     android:notificationTimeout="0" />

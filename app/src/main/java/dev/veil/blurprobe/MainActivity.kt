@@ -160,7 +160,8 @@ class MainActivity : Activity() {
             if (svc != null) {
                 val c = svc.consumptionSeconds()
                 append("消費量    ${formatDuration(c)}相当\n")
-                append("解除      ${if (svc.resetAvailable()) "残り1回" else "本日使用済"}")
+                append("解除      ${if (svc.resetAvailable()) "残り1回" else "本日使用済"}\n")
+                append("判定      ${svc.detectionStatus()}")
             } else {
                 append("消費量    —")
             }

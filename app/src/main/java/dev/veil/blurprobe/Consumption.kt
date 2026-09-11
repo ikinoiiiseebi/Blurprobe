@@ -217,6 +217,21 @@ class ConsumptionStore(context: Context) {
         return max(0L, (nextDayStart - shifted) / 60_000L).toInt()
     }
 
+    /**
+     * スワイプ 1 回ぶんの加算。
+     *
+     * 時間より重く数えるのは、**高速に飛ばす消費**を捉えるため。
+     * 1 本を 3 秒でスワイプし続ける使い方は、同じ時間じっと見ているより
+     * 消費として重い。蓄積中でなくても数える（1 枚送りは消費そのもの）。
+     */
+    fun addSwipe(weight: Double, now: Long = System.currentTimeMillis()) {
+        rolloverIfNeeded(now)
+        if (!accumulating) value(now)   // 減衰を先に効かせてから足す
+        c += weight
+        at = now
+        flush()
+    }
+
     /** 検証用。待たずに任意の消費量へ飛ばす */
     fun override(newValue: Double, now: Long = System.currentTimeMillis()) {
         c = max(0.0, newValue)

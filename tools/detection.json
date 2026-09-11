@@ -1,0 +1,12 @@
+{
+  "_comment": "YouTube の更新でビュー ID が変わったときは、ここを直して端末へ push する。再ビルドは不要。",
+  "shortsViewIds": [
+    "com.google.android.youtube:id/reel_recycler",
+    "com.google.android.youtube:id/reel_player_page_container",
+    "com.google.android.youtube:id/reel_progress_bar",
+    "com.google.android.youtube:id/reel_watch_player",
+    "com.google.android.youtube:id/shorts_container"
+  ],
+  "pageScrollRatio": 0.70,
+  "swipeWeight": 3
+}

@@ -72,6 +72,7 @@ class ProbeService : AccessibilityService() {
     private lateinit var store: ConsumptionStore
     private lateinit var settings: VeilSettings
     private lateinit var log: UsageLog
+    private lateinit var detector: ShortsDetector
 
     private var dialog: Dialog? = null
 
@@ -99,6 +100,10 @@ class ProbeService : AccessibilityService() {
         settings = VeilSettings(this)
         log = UsageLog(this)
         log.pruneIfNeeded()
+        detector = ShortsDetector(
+            DetectionConfig.load(this),
+            wm.currentWindowMetrics.bounds.height()
+        )
         createChannel()
         buildVeil()
         wm.addCrossWindowBlurEnabledListener(blurListener)
@@ -140,6 +145,24 @@ class ProbeService : AccessibilityService() {
      */
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
         val e = event ?: return
+
+        // 1 枚送りのスクロール。Shorts の一次判定とスワイプ計数を兼ねる
+        if (e.eventType == AccessibilityEvent.TYPE_VIEW_SCROLLED) {
+            if (frontPkg != Targets.YOUTUBE) return
+            val now = System.currentTimeMillis()
+            val wasShorts = detector.inShorts
+            if (detector.onScrolled(e.scrollDeltaY, now)) {
+                // スワイプは時間より重く数える。高速に飛ばす消費を捉えるため
+                store.addSwipe(detector.swipeWeight().toDouble())
+                if (!wasShorts) {
+                    Log.i(TAG, "Shorts判定 -> true（${detector.lastReason}）")
+                    syncAccumulation()
+                }
+                apply()
+            }
+            return
+        }
+
         if (e.eventType != AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) return
         val pkg = e.packageName?.toString() ?: return
 
@@ -153,6 +176,7 @@ class ProbeService : AccessibilityService() {
         }
         if (shadeFront || pkg != frontPkg) {
             shadeFront = false
+            if (pkg != frontPkg && frontPkg == Targets.YOUTUBE) detector.reset()
             frontPkg = pkg
             syncAccumulation()
             apply()
@@ -162,13 +186,26 @@ class ProbeService : AccessibilityService() {
     // ------------------------------------------------------------------ 計測
 
     /**
-     * 対象アプリを見ている最中だけ消費量を積む。
+     * いま実際に消費している対象。対象外なら null。
+     *
+     * **YouTube は Shorts を見ているときだけ対象**にする。通常の動画やフィードは数えない。
+     * X はアプリ全体を対象にする。タイムラインも個別ポストも消費であることに変わりはなく、
+     * 無理に区別すると壊れやすい判定を増やすだけになるため。
+     */
+    private fun activeTarget(): String? = when {
+        !Targets.isTarget(frontPkg) -> null
+        frontPkg == Targets.YOUTUBE && !detector.inShorts -> null
+        else -> frontPkg
+    }
+
+    /**
+     * 対象を見ている最中だけ消費量を積む。
      *
      * 機能が無効でも記録は続ける。**止めている間に何分見たのかが分からないと、
      * 止めた効果そのものが測れなくなる**ため。
      */
     private fun shouldAccumulate(): Boolean =
-        screenOn && !shadeFront && Targets.isTarget(frontPkg)
+        screenOn && !shadeFront && activeTarget() != null
 
     private fun syncAccumulation() {
         if (shouldAccumulate()) store.startAccumulating() else store.stopAccumulating()
@@ -176,9 +213,19 @@ class ProbeService : AccessibilityService() {
 
     private val ticker = object : Runnable {
         override fun run() {
+            // YouTube にいる間は 1 秒に 1 回だけビュー ID で裏を取る。
+            // 毎イベントで木を探すと重いので、この頻度に抑えている。
+            if (frontPkg == Targets.YOUTUBE && screenOn && !shadeFront) {
+                val before = detector.inShorts
+                detector.refreshByViewId(rootInActiveWindow, System.currentTimeMillis())
+                if (before != detector.inShorts) {
+                    syncAccumulation()
+                    apply()
+                }
+            }
             if (store.accumulating) {
                 store.tick()
-                frontPkg?.let { log.add(it) }
+                activeTarget()?.let { log.add(it) }
                 apply()
             }
             ui.postDelayed(this, TICK_MS)
@@ -201,7 +248,7 @@ class ProbeService : AccessibilityService() {
         if (!settings.enabled) return 0
         if (!auto) return manualRadius
         if (shadeFront || !screenOn) return 0
-        return settings.radiusFor(frontPkg, store.value())
+        return settings.radiusFor(activeTarget(), store.value())
     }
 
     private fun apply() {
@@ -285,6 +332,14 @@ class ProbeService : AccessibilityService() {
             "stop" -> { disableSelf(); return@post }
         }
         // 検証用。1 日待たずに解除の権利を戻す
+        if (i.getBooleanExtra("reloadDetection", false)) {
+            detector = ShortsDetector(
+                DetectionConfig.load(this),
+                wm.currentWindowMetrics.bounds.height()
+            )
+            Log.i(TAG, "判定設定を読み直した")
+            toast("判定設定を読み直しました")
+        }
         if (i.getBooleanExtra("unlock", false)) {
             store.unlockReset()
             Log.i(TAG, "手動リセットの権利を戻した（検証用）")
@@ -367,6 +422,13 @@ class ProbeService : AccessibilityService() {
     /** 画面に出すための現在値 */
     fun consumptionSeconds(): Int = store.value().toInt()
 
+    /** 判定の様子。ID が腐り始めていないかを見るため */
+    fun detectionStatus(): String = when {
+        frontPkg != Targets.YOUTUBE -> "—"
+        detector.inShorts -> "Shorts（${detector.lastReason}）"
+        else -> "Shorts以外"
+    } + if (detector.mismatchCount > 0) "　不一致${detector.mismatchCount}回" else ""
+
     private fun toast(msg: String) {
         Toast.makeText(this, msg, Toast.LENGTH_LONG).show()
     }
@@ -406,7 +468,7 @@ class ProbeService : AccessibilityService() {
             .setContentTitle(title)
             .setContentText(
                 if (!settings.enabled) "ぼかしは無効。視聴時間の記録だけ続けています"
-                else "${Targets.labelOf(frontPkg)} ・ 強度 ${(settings.strengthFor(frontPkg, store.value()) * 100).roundToInt()}%" +
+                else "${Targets.labelOf(activeTarget())} ・ 強度 ${(settings.strengthFor(activeTarget(), store.value()) * 100).roundToInt()}%" +
                     " ・ 解除 ${if (canReset) "残り1回" else "本日使用済"}"
             )
             .setOngoing(true)
@@ -435,11 +497,13 @@ class ProbeService : AccessibilityService() {
     fun status(): String {
         val c = store.value()
         return "pkg=%s C=%.0f (%.1f分) p=%.2f r=%d auto=%s acc=%s shade=%s screen=%s blur=%s".format(
-            frontPkg ?: "-", c, c / 60.0, settings.strengthFor(frontPkg, c), targetRadius(),
+            frontPkg ?: "-", c, c / 60.0, Curve.p(c), targetRadius(),
             auto, store.accumulating, shadeFront, screenOn, wm.isCrossWindowBlurEnabled
         ) + " reset=" + (if (store.canReset()) "可" else "本日使用済") +
             " enabled=" + settings.enabled +
-            " 到達=" + settings.fullMinutesFor(frontPkg) + "分"
+            " 到達=" + settings.fullMinutesFor(activeTarget()) + "分" +
+            " shorts=" + detector.inShorts + "(" + detector.lastReason + ")" +
+            " 不一致=" + detector.mismatchCount
     }
 
     private fun logEnvironment() {
