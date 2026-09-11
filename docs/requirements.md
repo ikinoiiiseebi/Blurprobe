@@ -72,7 +72,7 @@ p(C) = 1                            C ≥ T
 # 半径（アプリ別）
 R = R_MAX[app] × p(C)
 
-既定: G = 180, T = 1200, k = 2.0
+既定: G = 180, T = 600, k = 2.0
      R_MAX = { YouTube Shorts: 40, X: 16 }
 ```
 

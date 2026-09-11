@@ -41,7 +41,7 @@ class MainActivity : Activity() {
             body(
                 "V-01 の検証用。全画面のブラーウィンドウを 1 枚出すだけのアプリです。\n\n" +
                     "ユーザー補助をオンにすると常駐し、フローティングパネルが出ます。" +
-                    "YouTube Shorts を開いて段階ボタンで半径を変えてください。"
+                    "YouTube か X を開くと消費量が溜まり、猶予を超えるとぼけ始めます。"
             )
         )
 
@@ -101,11 +101,11 @@ class MainActivity : Activity() {
         root.addView(sectionLabel("4 ・ 確認する項目"), marginTop(dp(26)))
         root.addView(
             body(
-                "V-01  Shorts 再生中に S3 で映像がぼけるか\n" +
-                    "V-02  ぼけた状態でスワイプが通るか\n" +
-                    "V-03  X のタイムラインでも同じか\n" +
-                    "V-04  S4 で 30 分放置したときの発熱と電池\n\n" +
-                    "パネルが「blur 無効」に変わった瞬間があれば、その状況を記録してください。\n\n" +
+                "3分まで  何も起きない（猶予帯）\n" +
+                    "8分ごろ  はっきりぼけている\n" +
+                    "離脱90分 ぼけが約半分に戻る\n\n" +
+                    "待たずに確かめるなら消費量を直接入れられます。\n" +
+                    "adb shell am broadcast -n dev.veil.blurprobe/.CtlReceiver --ei c 600\n\n" +
                     "adb logcat -s BlurProbe  でログが追えます。"
             )
         )
@@ -126,6 +126,7 @@ class MainActivity : Activity() {
             append("display   ${b.width()} x ${b.height()} px @ ${d}x\n")
             append("logical   ${(b.width() / d).roundToInt()} x ${(b.height() / d).roundToInt()} dp\n")
             append("blur      ${if (wm.isCrossWindowBlurEnabled) "有効" else "無効"}\n")
+            append(veilState())
             append("常駐      ${if (serviceEnabled()) "オン" else "オフ ← 手順1へ"}\n")
             append("通知      ${if (notifGranted()) "許可済" else "未許可 ← 手順2へ"}\n")
             append("overlay   ${if (Settings.canDrawOverlays(this@MainActivity)) "許可済" else "未許可（比較用のみ必要）"}")
@@ -142,6 +143,14 @@ class MainActivity : Activity() {
     ) {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults)
         onResume()
+    }
+
+    /** サービスが動いていれば消費量とカーブの現在値を出す */
+    private fun veilState(): String {
+        val svc = ProbeService.instance ?: return "消費量    —（サービス未起動）\n"
+        return "状態      ${svc.status()}\n" +
+            "カーブ    G=${Curve.g.toInt()} T=${Curve.t.toInt()} k=${Curve.k}\n" +
+            "上限      Shorts=${Targets.rMaxOf(Targets.YOUTUBE)} X=${Targets.rMaxOf(Targets.X)}\n"
     }
 
     private fun serviceEnabled(): Boolean {

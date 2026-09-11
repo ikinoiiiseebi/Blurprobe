@@ -2,13 +2,13 @@ package dev.veil.blurprobe
 
 import android.service.quicksettings.Tile
 import android.service.quicksettings.TileService
+import kotlin.math.roundToInt
 
 /**
- * クイック設定タイル。通知シェードを下ろしてワンタップでぼかしを解除できる。
- * 画面がぼけて操作しづらくなったときの、adb を使わない復帰経路。
+ * クイック設定タイル。画面がぼけて操作しづらいときの、adb を使わない最短の復帰経路。
  *
  * 初回だけ手動で追加が必要:
- *   通知シェードを下ろす → 編集（鉛筆アイコン）→ 「Veil」をドラッグして配置
+ *   通知シェードを下ろす → 編集 → 「Veil」をドラッグして配置
  */
 class VeilTile : TileService() {
 
@@ -24,15 +24,7 @@ class VeilTile : TileService() {
     }
 
     override fun onClick() {
-        val svc = ProbeService.instance
-        if (svc == null) {
-            qsTile?.apply {
-                state = Tile.STATE_UNAVAILABLE
-                subtitle = "ユーザー補助が未設定"
-                updateTile()
-            }
-            return
-        }
+        val svc = ProbeService.instance ?: run { sync(); return }
         svc.toggleVeil()
         sync()
     }
