@@ -7,153 +7,304 @@ import android.content.pm.PackageManager
 import android.graphics.Color
 import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
-import android.net.Uri
 import android.os.Build
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
+import android.os.SystemClock
 import android.provider.Settings
 import android.view.Gravity
-import android.view.WindowManager
+import android.view.MotionEvent
+import android.view.View
 import android.view.accessibility.AccessibilityManager
 import android.widget.Button
 import android.widget.LinearLayout
 import android.widget.ScrollView
+import android.widget.SeekBar
 import android.widget.TextView
+import android.widget.Toast
 import kotlin.math.roundToInt
 
 /**
- * 権限を整える入口。サービスの起動・停止は「ユーザー補助」の ON/OFF で行う。
+ * 状態・記録・設定をまとめた画面。
+ *
+ * 触れるつまみは「最大ぼかしに到達するまでの時間」ひとつだけ。
+ * 猶予はそこから比例で決まるので、スライダー 1 本でカーブ全体の速さが変わる。
  */
 class MainActivity : Activity() {
 
-    private lateinit var envText: TextView
+    private val ui = Handler(Looper.getMainLooper())
+    private lateinit var settings: VeilSettings
+    private lateinit var log: UsageLog
+
+    private lateinit var statusText: TextView
+    private lateinit var recordText: TextView
+    /** アプリごとのスライダーと表示。pkg をキーに引く */
+    private val paceLabels = HashMap<String, TextView>()
+    private val paceDetails = HashMap<String, TextView>()
+    private lateinit var powerButton: Button
+    private lateinit var powerHint: TextView
+
+    /** 長押しの開始時刻。0 は押していない */
+    private var holdStart = 0L
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        settings = VeilSettings(this)
+        log = UsageLog(this)
 
         val root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setBackgroundColor(0xFF0E1114.toInt())
-            setPadding(dp(22), dp(46), dp(22), dp(34))
+            setBackgroundColor(BG)
+            setPadding(dp(22), dp(48), dp(22), dp(40))
         }
 
-        root.addView(heading("BlurProbe"))
+        root.addView(heading("Veil"))
         root.addView(
             body(
-                "V-01 の検証用。全画面のブラーウィンドウを 1 枚出すだけのアプリです。\n\n" +
-                    "ユーザー補助をオンにすると常駐し、フローティングパネルが出ます。" +
-                    "YouTube か X を開くと消費量が溜まり、猶予を超えるとぼけ始めます。"
+                "ショート動画を見続けるほど画面がぼけていきます。" +
+                    "見るのをやめるとゆっくり戻ります。"
             )
         )
 
-        envText = TextView(this).apply {
-            typeface = Typeface.MONOSPACE
-            textSize = 11.5f
-            setTextColor(0xFF8FD6BB.toInt())
-            setLineSpacing(0f, 1.35f)
-            setPadding(dp(13), dp(11), dp(13), dp(11))
-            background = GradientDrawable().apply {
-                cornerRadius = dp(10).toFloat()
-                setColor(0xFF171B1F.toInt())
-            }
-        }
-        root.addView(envText, marginTop(dp(18)))
+        // --- 状態 ---
+        root.addView(sectionLabel("状態"), marginTop(dp(28)))
+        statusText = mono()
+        root.addView(statusText, matchWidth())
 
-        root.addView(sectionLabel("1 ・ 常駐を有効にする"), marginTop(dp(26)))
+        // --- 記録 ---
+        root.addView(sectionLabel("記録"), marginTop(dp(26)))
+        recordText = mono()
+        root.addView(recordText, matchWidth())
+
+        // --- ペース（アプリごと） ---
+        root.addView(sectionLabel("ペース"), marginTop(dp(26)))
         root.addView(
             body(
-                "「ユーザー補助を開く」→ ダウンロードしたアプリ → BlurProbe → オン。\n" +
-                    "オンにした瞬間にパネルが出ます。オフにすれば完全に停止します。"
+                "最大までぼけきる時間をアプリごとに決めます。" +
+                    "無干渉の時間はここから 30% で自動的に決まります。"
             )
         )
-        root.addView(action("ユーザー補助を開く", primary = true) {
+        addPaceControl(root, Targets.YOUTUBE)
+        addPaceControl(root, Targets.X)
+
+        // --- 有効 / 無効 ---
+        root.addView(sectionLabel("機能の入切"), marginTop(dp(26)))
+        powerButton = Button(this).apply {
+            textSize = 15f
+            isAllCaps = false
+            gravity = Gravity.CENTER
+            setPadding(dp(16), dp(16), dp(16), dp(16))
+            layoutParams = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+            )
+        }
+        root.addView(powerButton)
+        powerHint = body("")
+        root.addView(powerHint)
+        wirePowerButton()
+
+        // --- 権限 ---
+        root.addView(sectionLabel("権限"), marginTop(dp(26)))
+        root.addView(action("ユーザー補助を開く") {
             startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
         })
-
-        root.addView(sectionLabel("2 ・ 復帰の経路を用意する"), marginTop(dp(26)))
-        root.addView(
-            body(
-                "画面がぼけたまま操作しづらくなったときの戻し方を、先に確保しておきます。\n\n" +
-                    "・常駐通知の「ぼかしを解除」ボタン\n" +
-                    "・クイック設定タイル「Veil」\n\n" +
-                    "解除は消費量を 0 に戻します。強い救済なので 1 日 1 回まで。\n" +
-                    "毎日使うようならカーブが厳しすぎるという合図です。\n\n" +
-                    "タイルは初回だけ手動で追加が必要です。通知シェードを下ろす → 編集 → " +
-                    "「Veil」を上のエリアにドラッグ。"
-            )
-        )
         root.addView(action("通知を許可") {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
                 requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), 1)
             }
         })
-
-        root.addView(sectionLabel("3 ・ 比較用（任意）"), marginTop(dp(26)))
         root.addView(
             body(
-                "パネルの TYPE ボタンで通常のオーバーレイと切り替えて挙動を比較できます。" +
-                    "そちらを試す場合だけ、以下の権限が必要です。"
-            )
-        )
-        root.addView(action("他のアプリの上に重ねて表示") {
-            startActivity(
-                Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION, Uri.parse("package:$packageName"))
-            )
-        })
-
-        root.addView(sectionLabel("4 ・ 確認する項目"), marginTop(dp(26)))
-        root.addView(
-            body(
-                "3分まで  何も起きない（猶予帯）\n" +
-                    "8分ごろ  はっきりぼけている\n" +
-                    "離脱90分 ぼけが約半分に戻る\n\n" +
-                    "待たずに確かめるなら消費量を直接入れられます。\n" +
-                    "adb shell am broadcast -n dev.veil.blurprobe/.CtlReceiver --ei c 600\n\n" +
-                    "adb logcat -s BlurProbe  でログが追えます。"
+                "クイック設定に「Veil」タイルを置いておくと、通知シェードから" +
+                    "1 日 1 回のぼかし解除がすぐ使えます。"
             )
         )
 
         setContentView(ScrollView(this).apply {
-            setBackgroundColor(0xFF0E1114.toInt())
+            setBackgroundColor(BG)
             addView(root)
         })
     }
 
     override fun onResume() {
         super.onResume()
-        val wm = getSystemService(WindowManager::class.java)
-        val b = wm.currentWindowMetrics.bounds
-        val d = resources.displayMetrics.density
-        envText.text = buildString {
-            append("${Build.MODEL}   Android ${Build.VERSION.RELEASE} (API ${Build.VERSION.SDK_INT})\n")
-            append("display   ${b.width()} x ${b.height()} px @ ${d}x\n")
-            append("logical   ${(b.width() / d).roundToInt()} x ${(b.height() / d).roundToInt()} dp\n")
-            append("blur      ${if (wm.isCrossWindowBlurEnabled) "有効" else "無効"}\n")
-            append(veilState())
-            append("常駐      ${if (serviceEnabled()) "オン" else "オフ ← 手順1へ"}\n")
-            append("通知      ${if (notifGranted()) "許可済" else "未許可 ← 手順2へ"}\n")
-            append("overlay   ${if (Settings.canDrawOverlays(this@MainActivity)) "許可済" else "未許可（比較用のみ必要）"}")
+        ui.post(refresher)
+    }
+
+    override fun onPause() {
+        ui.removeCallbacks(refresher)
+        cancelHold()
+        super.onPause()
+    }
+
+    private val refresher = object : Runnable {
+        override fun run() {
+            renderStatus()
+            renderRecord()
+            renderPace()
+            renderPower()
+            ui.postDelayed(this, 2000)
         }
     }
 
-    private fun notifGranted(): Boolean =
-        Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU ||
-            checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) ==
-            PackageManager.PERMISSION_GRANTED
+    // ------------------------------------------------------------------ 表示
 
-    override fun onRequestPermissionsResult(
-        requestCode: Int, permissions: Array<out String>, grantResults: IntArray
-    ) {
-        super.onRequestPermissionsResult(requestCode, permissions, grantResults)
-        onResume()
+    private fun renderStatus() {
+        val svc = ProbeService.instance
+        val running = svc != null && serviceEnabled()
+        statusText.text = buildString {
+            append("常駐      ${if (running) "動作中" else "停止中 ← ユーザー補助をオンに"}\n")
+            append("ぼかし    ${if (settings.enabled) "有効" else "無効"}\n")
+            if (svc != null) {
+                val c = svc.consumptionSeconds()
+                append("消費量    ${formatDuration(c)}相当\n")
+                append("解除      ${if (svc.resetAvailable()) "残り1回" else "本日使用済"}")
+            } else {
+                append("消費量    —")
+            }
+        }
     }
 
-    /** サービスが動いていれば消費量とカーブの現在値を出す */
-    private fun veilState(): String {
-        val svc = ProbeService.instance ?: return "消費量    —（サービス未起動）\n"
-        return "状態      ${svc.status()}\n" +
-            "カーブ    G=${Curve.g.toInt()} T=${Curve.t.toInt()} k=${Curve.k}\n" +
-            "上限      Shorts=${Targets.rMaxOf(Targets.YOUTUBE)} X=${Targets.rMaxOf(Targets.X)}\n"
+    private fun renderRecord() {
+        val ytWeek = log.weekSeconds(0, Targets.YOUTUBE)
+        val xWeek = log.weekSeconds(0, Targets.X)
+        val ytChange = log.formatChange(log.weekChangePercent(Targets.YOUTUBE))
+        val xChange = log.formatChange(log.weekChangePercent(Targets.X))
+        val allChange = log.formatChange(log.weekChangePercent())
+        val streak = ConsumptionStore(this).daysSinceReset()
+
+        recordText.text = buildString {
+            append("今週      YouTube ${formatDuration(ytWeek)}   X ${formatDuration(xWeek)}\n")
+            append("先週比    YouTube $ytChange   X $xChange\n")
+            append("合計      ${formatDuration(log.weekSeconds(0))}（先週比 $allChange）\n")
+            append("累計      ${formatDuration(log.totalSeconds())}\n")
+            append(
+                "解除      " + when {
+                    streak == null -> "一度も使っていません"
+                    streak == 0 -> "今日使いました"
+                    else -> "${streak}日連続で未使用"
+                }
+            )
+        }
     }
+
+    /** アプリ 1 つぶんのスライダーと内訳を組む */
+    private fun addPaceControl(parent: LinearLayout, pkg: String) {
+        val title = TextView(this).apply {
+            textSize = 16f
+            setTextColor(Color.WHITE)
+            setTypeface(null, Typeface.BOLD)
+            setPadding(0, dp(14), 0, 0)
+        }
+        parent.addView(title)
+        paceLabels[pkg] = title
+
+        val bar = SeekBar(this).apply {
+            max = VeilSettings.MAX_MINUTES - VeilSettings.MIN_MINUTES
+            progress = settings.fullMinutesFor(pkg) - VeilSettings.MIN_MINUTES
+            setPadding(0, dp(8), 0, dp(4))
+            setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+                override fun onProgressChanged(sb: SeekBar?, p: Int, fromUser: Boolean) {
+                    if (fromUser) {
+                        settings.setFullMinutes(pkg, p + VeilSettings.MIN_MINUTES)
+                        renderPace()
+                    }
+                }
+                override fun onStartTrackingTouch(sb: SeekBar?) {}
+                override fun onStopTrackingTouch(sb: SeekBar?) {
+                    ProbeService.instance?.reloadSettings()
+                }
+            })
+        }
+        parent.addView(bar, matchWidth())
+
+        val detail = mono()
+        parent.addView(detail, matchWidth())
+        paceDetails[pkg] = detail
+    }
+
+    private fun renderPace() {
+        listOf(Targets.YOUTUBE to "YouTube", Targets.X to "X").forEach { (pkg, name) ->
+            paceLabels[pkg]?.text = "$name　${settings.fullMinutesFor(pkg)}分で最大"
+            paceDetails[pkg]?.text = buildString {
+                append("無干渉    ${formatDuration(settings.graceSecondsFor(pkg))}まで\n")
+                append("体感      ${formatDuration(settings.noticeableSecondsFor(pkg))}あたりから\n")
+                append("最大      ${formatDuration(settings.fullSecondsIntFor(pkg))}　半径 ${Targets.rMaxOf(pkg)}")
+            }
+        }
+    }
+
+    private fun renderPower() {
+        if (holdStart != 0L) return   // 長押し中は上書きしない
+        if (settings.enabled) {
+            powerButton.text = "長押しで停止（3分）"
+            powerButton.background = pill(0xFF2B1E1E.toInt())
+            powerButton.setTextColor(0xFFF2B8B5.toInt())
+            powerHint.text =
+                "止めるには3分間押し続ける必要があります。指を離すとやり直しです。" +
+                    "衝動的にやめられないための仕掛けです。"
+        } else {
+            powerButton.text = "再開する"
+            powerButton.background = pill(ACCENT)
+            powerButton.setTextColor(0xFF07171A.toInt())
+            powerHint.text = "停止中も視聴時間の記録は続いています。再開はタップ一回です。"
+        }
+    }
+
+    // ------------------------------------------------------------ 長押しで停止
+
+    private fun wirePowerButton() {
+        powerButton.setOnTouchListener { _, e ->
+            if (!settings.enabled) {
+                if (e.action == MotionEvent.ACTION_UP) {
+                    settings.enabled = true
+                    ProbeService.instance?.reloadSettings()
+                    toast("再開しました")
+                    renderPower()
+                }
+                return@setOnTouchListener true
+            }
+            when (e.action) {
+                MotionEvent.ACTION_DOWN -> {
+                    holdStart = SystemClock.uptimeMillis()
+                    ui.post(holdTick)
+                }
+                MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> cancelHold()
+            }
+            true
+        }
+    }
+
+    private val holdTick = object : Runnable {
+        override fun run() {
+            if (holdStart == 0L) return
+            val held = SystemClock.uptimeMillis() - holdStart
+            val left = VeilSettings.DISABLE_HOLD_MS - held
+            if (left <= 0) {
+                holdStart = 0L
+                settings.enabled = false
+                ProbeService.instance?.reloadSettings()
+                toast("ぼかしを停止しました")
+                renderPower()
+                return
+            }
+            val pct = (held * 100 / VeilSettings.DISABLE_HOLD_MS).toInt()
+            powerButton.text = "あと ${formatDuration((left / 1000).toInt())}　$pct%"
+            ui.postDelayed(this, 100)
+        }
+    }
+
+    private fun cancelHold() {
+        if (holdStart == 0L) return
+        val held = SystemClock.uptimeMillis() - holdStart
+        holdStart = 0L
+        if (held > 3000) toast("離してしまいました。最初からです")
+        renderPower()
+    }
+
+    // ------------------------------------------------------------- view help
 
     private fun serviceEnabled(): Boolean {
         val am = getSystemService(AccessibilityManager::class.java) ?: return false
@@ -162,11 +313,21 @@ class MainActivity : Activity() {
         ).any { it.id.orEmpty().contains(packageName) }
     }
 
-    // ------------------------------------------------------------- view help
+    override fun onRequestPermissionsResult(
+        requestCode: Int, permissions: Array<out String>, grantResults: IntArray
+    ) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+        renderStatus()
+    }
+
+    private fun notifGranted(): Boolean =
+        Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU ||
+            checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) ==
+            PackageManager.PERMISSION_GRANTED
 
     private fun heading(t: String) = TextView(this).apply {
         text = t
-        textSize = 27f
+        textSize = 30f
         setTextColor(Color.WHITE)
         setTypeface(null, Typeface.BOLD)
     }
@@ -175,42 +336,68 @@ class MainActivity : Activity() {
         text = t
         textSize = 11f
         typeface = Typeface.MONOSPACE
-        letterSpacing = 0.12f
-        setTextColor(0xFF35B6C0.toInt())
-        setPadding(0, 0, 0, dp(7))
+        letterSpacing = 0.14f
+        setTextColor(ACCENT)
+        setPadding(0, 0, 0, dp(8))
     }
 
     private fun body(t: String) = TextView(this).apply {
         text = t
-        textSize = 13.5f
-        setTextColor(0xFFA8B0B6.toInt())
-        setLineSpacing(0f, 1.45f)
+        textSize = 13f
+        setTextColor(0xFF97A0A7.toInt())
+        setLineSpacing(0f, 1.5f)
         setPadding(0, dp(9), 0, 0)
     }
 
-    private fun action(label: String, primary: Boolean = false, onClick: () -> Unit) =
-        Button(this).apply {
-            text = label
-            textSize = 14f
-            isAllCaps = false
-            gravity = Gravity.CENTER
-            setTextColor(if (primary) 0xFF07171A.toInt() else Color.WHITE)
-            setPadding(dp(16), dp(13), dp(16), dp(13))
-            background = GradientDrawable().apply {
-                cornerRadius = dp(11).toFloat()
-                setColor(if (primary) 0xFF35B6C0.toInt() else 0xFF22272C.toInt())
-            }
-            layoutParams = LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT,
-                LinearLayout.LayoutParams.WRAP_CONTENT
-            ).apply { topMargin = dp(8) }
-            setOnClickListener { onClick() }
+    private fun mono() = TextView(this).apply {
+        typeface = Typeface.MONOSPACE
+        textSize = 12.5f
+        setTextColor(0xFFD6DBDF.toInt())
+        setLineSpacing(0f, 1.45f)
+        setPadding(dp(14), dp(12), dp(14), dp(12))
+        background = GradientDrawable().apply {
+            cornerRadius = dp(10).toFloat()
+            setColor(CARD)
         }
+    }
+
+    private fun action(label: String, onClick: () -> Unit) = Button(this).apply {
+        text = label
+        textSize = 14f
+        isAllCaps = false
+        gravity = Gravity.CENTER
+        setTextColor(Color.WHITE)
+        setPadding(dp(16), dp(13), dp(16), dp(13))
+        background = pill(CARD)
+        layoutParams = LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams.MATCH_PARENT,
+            LinearLayout.LayoutParams.WRAP_CONTENT
+        ).apply { topMargin = dp(8) }
+        setOnClickListener { onClick() }
+    }
+
+    private fun pill(color: Int) = GradientDrawable().apply {
+        cornerRadius = dp(12).toFloat()
+        setColor(color)
+    }
 
     private fun marginTop(px: Int) = LinearLayout.LayoutParams(
         LinearLayout.LayoutParams.MATCH_PARENT,
         LinearLayout.LayoutParams.WRAP_CONTENT
     ).apply { topMargin = px }
 
+    private fun matchWidth() = LinearLayout.LayoutParams(
+        LinearLayout.LayoutParams.MATCH_PARENT,
+        LinearLayout.LayoutParams.WRAP_CONTENT
+    )
+
+    private fun toast(m: String) = Toast.makeText(this, m, Toast.LENGTH_SHORT).show()
+
     private fun dp(v: Int): Int = (v * resources.displayMetrics.density).roundToInt()
+
+    companion object {
+        private const val BG = 0xFF0E1114.toInt()
+        private const val CARD = 0xFF1B2025.toInt()
+        private const val ACCENT = 0xFF35B6C0.toInt()
+    }
 }

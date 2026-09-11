@@ -6,8 +6,8 @@ import android.service.quicksettings.TileService
 /**
  * クイック設定タイル。**1 日 1 回だけ**ぼかしを解除できる。
  *
- * 解除は消費量 C を 0 に戻す強い救済なので回数を絞っている。
- * 使ったこと自体が記録に残り、毎日使うようならカーブが厳しすぎるという判断材料になる。
+ * 解除は消費量を 0 に戻す強い救済なので回数を絞っている。
+ * 使ったこと自体が記録に残り、毎日使うようならペースが速すぎるという合図になる。
  *
  * 初回だけ手動で追加が必要:
  *   通知シェードを下ろす → 編集 → 「Veil」をドラッグして配置
@@ -27,7 +27,6 @@ class VeilTile : TileService() {
 
     override fun onClick() {
         val svc = ProbeService.instance ?: run { sync(); return }
-        // 使えたかどうかの案内はサービス側がトーストで出す
         svc.requestReset()
         sync()
     }
@@ -40,8 +39,11 @@ class VeilTile : TileService() {
                     state = Tile.STATE_UNAVAILABLE
                     subtitle = "未起動"
                 }
+                !svc.isEnabled() -> {
+                    state = Tile.STATE_UNAVAILABLE
+                    subtitle = "停止中"
+                }
                 !svc.resetAvailable() -> {
-                    // 今日はもう使えない。押しても案内が出るだけ
                     state = Tile.STATE_INACTIVE
                     subtitle = "本日使用済"
                 }

@@ -17,10 +17,14 @@ object Targets {
     const val YOUTUBE = "com.google.android.youtube"
     const val X = "com.twitter.android"
 
-    /** Pixel 9 Pro XL / 1344px 幅での実測値 */
+    /**
+     * 半径の上限。Pixel 9 Pro XL / 1344px 幅での判読限界（Shorts 40 / X 16）を
+     * 1.5 倍したもの。限界ちょうどだと「かろうじて読めてしまう」余地が残るため、
+     * 確実に潰しきれるところまで上げてある。
+     */
     val R_MAX = mapOf(
-        YOUTUBE to 40,
-        X to 16,
+        YOUTUBE to 60,
+        X to 24,
     )
 
     fun isTarget(pkg: String?): Boolean = pkg != null && R_MAX.containsKey(pkg)
@@ -39,25 +43,39 @@ object Targets {
  * 序盤で一気に潰れて後半は何も起きない。k = 2.0 前後で初めて「じわじわ効く」。
  */
 object Curve {
-    /** 猶予。ここまでは一切干渉しない */
-    var g = 180.0
-
-    /** 上限に到達する消費量 */
-    var t = 1200.0
-
-    /** 曲線の指数 */
+    /** 曲線の指数。2.0 前後で初めて「じわじわ効く」形になる */
     var k = 2.0
 
-    fun p(c: Double): Double = when {
-        c <= g -> 0.0
-        c >= t -> 1.0
-        else -> ((c - g) / (t - g)).pow(k)
+    /** 到達時間のうち猶予が占める割合。この比率でカーブの形が決まる */
+    const val GRACE_RATIO = 0.30
+
+    fun graceOf(fullSec: Double): Double = fullSec * GRACE_RATIO
+
+    /**
+     * 強度 0〜1。到達時間はアプリごとに違うので引数で受ける。
+     *
+     * σ は半径に線形なので体感の劣化は前半に集中する。k = 1.0（線形）だと
+     * 序盤で一気に潰れて後半は何も起きない。
+     */
+    fun p(c: Double, fullSec: Double): Double {
+        val g = graceOf(fullSec)
+        return when {
+            c <= g -> 0.0
+            c >= fullSec -> 1.0
+            else -> ((c - g) / (fullSec - g)).pow(k)
+        }
     }
 
-    /** 対象アプリでの半径。対象外なら 0。 */
-    fun radiusFor(pkg: String?, c: Double): Int =
+    /** 強度 20% に達する消費量。体感でぼけ始める目安 */
+    fun noticeableAt(fullSec: Double): Double {
+        val g = graceOf(fullSec)
+        return g + (fullSec - g) * Math.pow(0.2, 1.0 / k)
+    }
+
+    /** 対象アプリでの半径。対象外なら 0 */
+    fun radiusFor(pkg: String?, c: Double, fullSec: Double): Int =
         if (!Targets.isTarget(pkg)) 0
-        else (Targets.rMaxOf(pkg) * p(c)).roundToInt()
+        else (Targets.rMaxOf(pkg) * p(c, fullSec)).roundToInt()
 }
 
 /**
@@ -219,6 +237,17 @@ class ConsumptionStore(context: Context) {
     }
 
     fun persistNow() = flush(force = true)
+
+    /**
+     * 最後にリセットを使ってから何日経ったか。一度も使っていなければ null。
+     *
+     * 「何日連続で使わずにいるか」は、このアプリだけが持つ信号。
+     * 毎日使っているならカーブが厳しすぎる。
+     */
+    fun daysSinceReset(now: Long = System.currentTimeMillis()): Int? {
+        if (resetDay < 0) return null
+        return (veilDay(now) - resetDay).toInt()
+    }
 
     /** 表示用。今日リセットを使ったかどうか */
     fun resetUsedToday(now: Long = System.currentTimeMillis()): Boolean = !canReset(now)

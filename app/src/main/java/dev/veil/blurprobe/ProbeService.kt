@@ -70,6 +70,8 @@ class ProbeService : AccessibilityService() {
     private val ui = Handler(Looper.getMainLooper())
     private lateinit var wm: WindowManager
     private lateinit var store: ConsumptionStore
+    private lateinit var settings: VeilSettings
+    private lateinit var log: UsageLog
 
     private var dialog: Dialog? = null
 
@@ -94,6 +96,9 @@ class ProbeService : AccessibilityService() {
         instance = this
         wm = getSystemService(WindowManager::class.java)
         store = ConsumptionStore(this)
+        settings = VeilSettings(this)
+        log = UsageLog(this)
+        log.pruneIfNeeded()
         createChannel()
         buildVeil()
         wm.addCrossWindowBlurEnabledListener(blurListener)
@@ -156,7 +161,12 @@ class ProbeService : AccessibilityService() {
 
     // ------------------------------------------------------------------ 計測
 
-    /** 対象アプリを見ている最中だけ消費量を積む */
+    /**
+     * 対象アプリを見ている最中だけ消費量を積む。
+     *
+     * 機能が無効でも記録は続ける。**止めている間に何分見たのかが分からないと、
+     * 止めた効果そのものが測れなくなる**ため。
+     */
     private fun shouldAccumulate(): Boolean =
         screenOn && !shadeFront && Targets.isTarget(frontPkg)
 
@@ -168,6 +178,7 @@ class ProbeService : AccessibilityService() {
         override fun run() {
             if (store.accumulating) {
                 store.tick()
+                frontPkg?.let { log.add(it) }
                 apply()
             }
             ui.postDelayed(this, TICK_MS)
@@ -185,11 +196,12 @@ class ProbeService : AccessibilityService() {
 
     // ------------------------------------------------------------------ 適用
 
-    /** いま当てるべき半径。対象外・シェード表示中・画面 OFF では 0 */
+    /** いま当てるべき半径。無効化中・対象外・シェード表示中・画面 OFF では 0 */
     private fun targetRadius(): Int {
+        if (!settings.enabled) return 0
         if (!auto) return manualRadius
         if (shadeFront || !screenOn) return 0
-        return Curve.radiusFor(frontPkg, store.value())
+        return settings.radiusFor(frontPkg, store.value())
     }
 
     private fun apply() {
@@ -287,8 +299,19 @@ class ProbeService : AccessibilityService() {
             auto = true
         }
         // カーブの調整
-        if (i.hasExtra("g")) Curve.g = max(0, i.getIntExtra("g", 180)).toDouble()
-        if (i.hasExtra("t")) Curve.t = max(1, i.getIntExtra("t", 1200)).toDouble()
+        // 到達時間を分で指定。猶予は 30% で連動する
+        if (i.hasExtra("ytmin")) {
+            settings.setFullMinutes(Targets.YOUTUBE, i.getIntExtra("ytmin", VeilSettings.DEFAULT_YOUTUBE_MIN))
+            Log.i(TAG, "YouTube の到達時間を ${settings.fullMinutesFor(Targets.YOUTUBE)} 分に変更")
+        }
+        if (i.hasExtra("xmin")) {
+            settings.setFullMinutes(Targets.X, i.getIntExtra("xmin", VeilSettings.DEFAULT_X_MIN))
+            Log.i(TAG, "X の到達時間を ${settings.fullMinutesFor(Targets.X)} 分に変更")
+        }
+        if (i.hasExtra("enabled")) {
+            settings.enabled = i.getBooleanExtra("enabled", true)
+            Log.i(TAG, "機能を ${if (settings.enabled) "有効" else "無効"} に変更")
+        }
         if (i.hasExtra("k10")) Curve.k = max(1, i.getIntExtra("k10", 20)) / 10.0
 
         // 手動での半径指定。auto を切って使う
@@ -328,6 +351,22 @@ class ProbeService : AccessibilityService() {
     /** 今日まだ解除を使っていないか。タイルと通知の表示に使う */
     fun resetAvailable(): Boolean = store.canReset()
 
+    /** 機能が有効か */
+    fun isEnabled(): Boolean = settings.enabled
+
+    /** 設定画面から変更されたときに呼ぶ */
+    fun reloadSettings() = ui.post {
+        Log.i(
+            TAG,
+            "設定を再読込: YouTube ${settings.fullMinutesFor(Targets.YOUTUBE)}分 / " +
+                "X ${settings.fullMinutesFor(Targets.X)}分 / enabled=${settings.enabled}"
+        )
+        apply()
+    }
+
+    /** 画面に出すための現在値 */
+    fun consumptionSeconds(): Int = store.value().toInt()
+
     private fun toast(msg: String) {
         Toast.makeText(this, msg, Toast.LENGTH_LONG).show()
     }
@@ -355,6 +394,7 @@ class ProbeService : AccessibilityService() {
             PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
         )
         val title = when {
+            !settings.enabled -> "停止中"
             !auto -> "手動  r $r"
             r > 0 -> "ぼかし中  r $r"
             store.accumulating -> "計測中  ${"%.1f".format(mins)}分"
@@ -365,14 +405,19 @@ class ProbeService : AccessibilityService() {
             .setSmallIcon(android.R.drawable.ic_menu_view)
             .setContentTitle(title)
             .setContentText(
-                "${Targets.labelOf(frontPkg)} ・ 強度 ${(Curve.p(store.value()) * 100).roundToInt()}%" +
+                if (!settings.enabled) "ぼかしは無効。視聴時間の記録だけ続けています"
+                else "${Targets.labelOf(frontPkg)} ・ 強度 ${(settings.strengthFor(frontPkg, store.value()) * 100).roundToInt()}%" +
                     " ・ 解除 ${if (canReset) "残り1回" else "本日使用済"}"
             )
             .setOngoing(true)
             .setOnlyAlertOnce(true)
             .setShowWhen(false)
             .setContentIntent(open)
-            .addAction(cmdAction(if (canReset) "ぼかしを解除" else "解除は明日まで待つ", "reset"))
+            .let { b ->
+                if (settings.enabled) {
+                    b.addAction(cmdAction(if (canReset) "ぼかしを解除" else "解除は明日まで待つ", "reset"))
+                } else b
+            }
             .build()
         runCatching { nm.notify(NOTIF_ID, n) }
             .onFailure { e -> Log.w(TAG, "通知を出せません（権限未許可?）: $e") }
@@ -390,9 +435,11 @@ class ProbeService : AccessibilityService() {
     fun status(): String {
         val c = store.value()
         return "pkg=%s C=%.0f (%.1f分) p=%.2f r=%d auto=%s acc=%s shade=%s screen=%s blur=%s".format(
-            frontPkg ?: "-", c, c / 60.0, Curve.p(c), targetRadius(),
+            frontPkg ?: "-", c, c / 60.0, settings.strengthFor(frontPkg, c), targetRadius(),
             auto, store.accumulating, shadeFront, screenOn, wm.isCrossWindowBlurEnabled
-        ) + " reset=" + (if (store.canReset()) "可" else "本日使用済")
+        ) + " reset=" + (if (store.canReset()) "可" else "本日使用済") +
+            " enabled=" + settings.enabled +
+            " 到達=" + settings.fullMinutesFor(frontPkg) + "分"
     }
 
     private fun logEnvironment() {
@@ -401,7 +448,8 @@ class ProbeService : AccessibilityService() {
             TAG,
             "device=${android.os.Build.MODEL} sdk=${android.os.Build.VERSION.SDK_INT} " +
                 "display=${b.width()}x${b.height()} " +
-                "curve G=${Curve.g} T=${Curve.t} k=${Curve.k} " +
+                "到達 YouTube=${settings.fullMinutesFor(Targets.YOUTUBE)}分 " +
+                "X=${settings.fullMinutesFor(Targets.X)}分 k=${Curve.k} " +
                 "blurEnabled=${wm.isCrossWindowBlurEnabled}"
         )
     }
